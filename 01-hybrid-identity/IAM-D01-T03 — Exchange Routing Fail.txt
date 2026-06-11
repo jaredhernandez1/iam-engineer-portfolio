@@ -1,0 +1,99 @@
+**IAM-D01-T03 — Exchange Routing Failure: Incorrect ProxyAddress on Synced User**
+Folder: 01-hybrid-identity/
+Type: Root Cause Analysis
+Environment: Lab — Meridian Consulting Group
+Status: ✅ Resolved
+
+---
+
+**What Was Reported**
+
+Rachel Torres (rtorres), HR Generalist, stopped receiving emails from external senders. Internal Teams messages and calendar worked fine. External senders reported receiving NDR 550 5.1.1 bounce-backs. The Exchange admin said she "looked fine" in the Exchange Admin Center but couldn't explain the routing failure.
+
+---
+
+**What I Found**
+
+The `mail` and `proxyAddresses` attributes in on-premises AD were set to an incorrect address. Because `meridianiam.net` is a verified domain in Entra, Entra Connect pushed the bad data through to Entra ID and Exchange Online.
+
+Confirmed via PowerShell on-premises:
+
+<!-- INSERT SCREENSHOT: Get-ADUser output showing wrong mail and proxyAddresses -->
+
+```powershell
+Get-ADUser -Identity rtorres -Properties mail, proxyAddresses |
+    Select-Object SamAccountName, mail, proxyAddresses
+```
+
+Entra ID Contact Information showing wrong email address:
+
+<!-- INSERT SCREENSHOT: Entra portal showing wrongaddress@meridianiam.net in Email field -->
+
+Proxy addresses blade showing wrong primary SMTP stamp:
+
+<!-- INSERT SCREENSHOT: Proxy addresses showing SMTP:wrongaddress as primary -->
+
+Exchange Admin Center confirming wrong routing address on mailbox:
+
+<!-- INSERT SCREENSHOT: Exchange EAC email addresses tab showing wrong address -->
+
+**Key finding:** Entra Connect only pushes `proxyAddresses` values through to Entra if the domain suffix is verified in the tenant. When using an unverified suffix like `.local`, the bad address is silently dropped and the cloud object is protected. When the suffix is verified — as `meridianiam.net` is — the bad data propagates fully into Entra ID and Exchange Online.
+
+---
+
+**What I Changed**
+
+Corrected the `mail` and `proxyAddresses` attributes in on-premises AD via ADUC Attribute Editor:
+
+<!-- INSERT SCREENSHOT: ADUC Attribute Editor showing correct proxyAddresses after fix -->
+
+Verified corrected attributes on-premises before syncing:
+
+<!-- INSERT SCREENSHOT: Get-ADUser output showing correct mail and proxyAddresses -->
+
+```powershell
+Set-ADUser -Identity rtorres `
+    -EmailAddress "rtorres@meridianiam.net" `
+    -Replace @{proxyAddresses = "SMTP:rtorres@meridianiam.net"}
+```
+
+Triggered a delta sync:
+
+```powershell
+Start-ADSyncSyncCycle -PolicyType Delta
+```
+
+Used `-PolicyType Delta` because rtorres was already synced — only the attribute values needed to update, not a full object evaluation.
+
+---
+
+**Validation**
+
+Entra portal after fix — correct address confirmed:
+
+<!-- INSERT SCREENSHOT: Entra Contact Information showing rtorres@meridianiam.net -->
+
+Exchange Admin Center after fix — correct primary SMTP confirmed:
+
+<!-- INSERT SCREENSHOT: Exchange EAC showing correct primary SMTP address -->
+
+```powershell
+Get-EXORecipient -Identity "rtorres" |
+    Select-Object DisplayName, PrimarySmtpAddress, EmailAddresses
+```
+
+✅ PrimarySmtpAddress = rtorres@meridianiam.net
+✅ Proxy addresses shows SMTP: capital prefix on correct address
+✅ Sync Service Manager — delta export shows successful update
+
+---
+
+**Lessons Learned**
+
+For synced users, on-premises AD is the authoritative source — editing attributes in the M365 portal or Entra reverts on the next sync cycle
+
+`SMTP:` with a capital prefix is the primary routing address — only one is allowed per mailbox. `smtp:` lowercase is a secondary alias
+
+Entra Connect silently filters `proxyAddresses` values for unverified domain suffixes before they reach Entra — verified domain suffixes always propagate through
+
+A provisioning checklist should validate `mail` and `proxyAddresses` in AD before a user's start date — not after routing failures are reported
